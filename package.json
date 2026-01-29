@@ -8,6 +8,7 @@
 		"modules/cool-retro-term-electron"
 	],
 	"scripts": {
+		"postinstall": "npm run rebuild --workspace=cool-retro-term-electron",
 		"build": "npm run build --workspaces",
 		"build:renderer": "npm run build --workspace=cool-retro-term-renderer",
 		"build:electron": "npm run build --workspace=cool-retro-term-electron",
@@ -27,6 +28,7 @@
 		"url": "https://github.com/remojansen/cool-retro-term-webgl"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^1.9.4"
+		"@biomejs/biome": "^1.9.4",
+		"app-builder-bin": "^5.0.0-alpha.10"
 	}
 }

@@ -35,6 +35,10 @@ function createWindow(): void {
 	mainWindow = new BrowserWindow({
 		width,
 		height,
+		minHeight: height,
+		minWidth: width,
+		fullscreen: true,
+		resizable: false,
 		backgroundColor: "#000000",
 		webPreferences: {
 			preload: path.join(__dirname, "preload.cjs"),

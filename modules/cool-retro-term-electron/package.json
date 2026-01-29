@@ -35,11 +35,17 @@
 			"target": [
 				{
 					"target": "dmg",
-					"arch": ["x64", "arm64"]
+					"arch": [
+						"x64",
+						"arm64"
+					]
 				},
 				{
 					"target": "zip",
-					"arch": ["x64", "arm64"]
+					"arch": [
+						"x64",
+						"arm64"
+					]
 				}
 			],
 			"hardenedRuntime": true,
@@ -63,11 +69,15 @@
 			"target": [
 				{
 					"target": "nsis",
-					"arch": ["x64"]
+					"arch": [
+						"x64"
+					]
 				},
 				{
 					"target": "zip",
-					"arch": ["x64"]
+					"arch": [
+						"x64"
+					]
 				}
 			],
 			"icon": "icons/256x256/cool-retro-term.png"
@@ -80,11 +90,15 @@
 			"target": [
 				{
 					"target": "AppImage",
-					"arch": ["x64"]
+					"arch": [
+						"x64"
+					]
 				},
 				{
 					"target": "deb",
-					"arch": ["x64"]
+					"arch": [
+						"x64"
+					]
 				}
 			],
 			"category": "Development",
@@ -127,6 +141,7 @@
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.4",
 		"@types/node": "^22.10.2",
+		"app-builder-bin": "^5.0.0-alpha.10",
 		"electron": "33.2.1",
 		"electron-builder": "^25.1.8",
 		"tsup": "^8.3.5",
