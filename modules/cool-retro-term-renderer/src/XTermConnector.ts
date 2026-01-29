@@ -206,6 +206,34 @@ export class XTermConnector {
 			},
 			{ passive: false },
 		);
+
+		// Right-click: copy if text is selected, paste if not
+		container.addEventListener("contextmenu", (event: MouseEvent) => {
+			event.preventDefault();
+
+			const selection = this.terminalText.getSelection();
+			const hasSelection = selection.start && selection.end &&
+				(selection.start.row !== selection.end.row ||
+				selection.start.col !== selection.end.col);
+
+			if (hasSelection) {
+				// Copy selected text to clipboard
+				this.copySelectionToClipboard();
+			} else {
+				// Paste from clipboard
+				navigator.clipboard.readText()
+					.then((text) => {
+						if (text) {
+							this.xterm.paste(text);
+						}
+						this.xterm.focus();
+					})
+					.catch((err) => {
+						console.warn("Could not read from clipboard:", err);
+						this.xterm.focus();
+					});
+			}
+		});
 	}
 
 	/**
