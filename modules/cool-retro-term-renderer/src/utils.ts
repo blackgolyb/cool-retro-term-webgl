@@ -68,3 +68,87 @@ export function colorToVec3(color: Color): [number, number, number] {
 export function colorToVec4(color: Color): [number, number, number, number] {
 	return [color.r, color.g, color.b, color.a];
 }
+
+/**
+ * Inverse barrel distortion: given a pixel position on screen, compute
+ * where that pixel would be on the undistorted (flat) terminal surface.
+ *
+ * The barrel distortion in the shader is:
+ *   cc = vec2(0.5) - uv
+ *   ccCorrected = cc (with aspect ratio correction)
+ *   dist = dot(ccCorrected, ccCorrected) * curvature
+ *   distorted = uv - cc * (1 + dist) * dist
+ *
+ * This function approximates the inverse using iterative refinement.
+ *
+ * @param pixelX - X pixel coordinate on screen
+ * @param pixelY - Y pixel coordinate on screen
+ * @param width - Screen width in pixels
+ * @param height - Screen height in pixels
+ * @param curvature - Curvature amount (same value passed to shader)
+ * @returns Corrected pixel coordinates on the flat terminal surface
+ */
+export function projectPixelWithCurvature(
+	pixelX: number,
+	pixelY: number,
+	width: number,
+	height: number,
+	curvature: number,
+): { x: number; y: number } {
+	if (curvature <= 0) {
+		return { x: pixelX, y: pixelY };
+	}
+
+	// Normalize to UV space [0, 1]
+	const targetU = pixelX / width;
+	const targetV = pixelY / height;
+
+	// Aspect ratio correction (matching the shader)
+	const aspectRatio = width / height;
+
+	// Forward barrel distortion function
+	function barrelDistort(u: number, v: number): { u: number; v: number } {
+		const ccX = 0.5 - u;
+		const ccY = 0.5 - v;
+
+		let ccCorrX = ccX;
+		let ccCorrY = ccY;
+		if (aspectRatio > 1.0) {
+			ccCorrX /= aspectRatio;
+		} else {
+			ccCorrY *= aspectRatio;
+		}
+
+		const dist = (ccCorrX * ccCorrX + ccCorrY * ccCorrY) * curvature;
+		const factor = (1.0 + dist) * dist;
+
+		return {
+			u: u - ccX * factor,
+			v: v - ccY * factor,
+		};
+	}
+
+	// Iterative inverse: start with target and refine
+	let guessU = targetU;
+	let guessV = targetV;
+
+	for (let i = 0; i < 10; i++) {
+		const distorted = barrelDistort(guessU, guessV);
+		const errorU = distorted.u - targetU;
+		const errorV = distorted.v - targetV;
+
+		guessU -= errorU;
+		guessV -= errorV;
+
+		// Early exit if converged
+		if (Math.abs(errorU) < 1e-6 && Math.abs(errorV) < 1e-6) {
+			break;
+		}
+	}
+
+	// Convert back to pixel space
+	return {
+		x: guessU * width,
+		y: guessV * height,
+	};
+}

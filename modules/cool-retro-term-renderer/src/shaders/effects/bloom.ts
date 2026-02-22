@@ -8,12 +8,22 @@
  * created by Qt's FastBlur with radius 32. For the web version, we simulate
  * this with a multi-tap blur approximation.
  *
- * QML code:
- *   vec4 bloomFullColor = texture2D(bloomSource, txt_coords);
+ * Original QML static shader (terminal_static.frag):
+ *   vec4 bloomFullColor = texture(bloomSource, txt_coords);
  *   vec3 bloomColor = bloomFullColor.rgb;
  *   float bloomAlpha = bloomFullColor.a;
- *   bloomColor = convertWithChroma(bloomColor);
- *   finalColor += clamp(bloomColor * bloom * bloomAlpha, 0.0, 0.5);
+ *
+ *   vec3 bloomOnScreen = bloomColor * isScreen;
+ *   finalColor += clamp(bloomOnScreen * bloom * bloomAlpha, 0.0, 0.5);
+ *   float bloomScale = 1.0 + max(bloom, 0.0);
+ *   finalColor /= bloomScale;
+ *
+ * IMPORTANT: In the original, bloom is applied as RAW color in the static pass
+ * (no chroma conversion). The bloomScale division normalizes the range so it
+ * fits in the [0,1] render target. The dynamic pass then multiplies by
+ * bloomScale to restore the full range before applying chroma conversion.
+ * This way bloom goes through chroma conversion together with the rest of the
+ * color in the dynamic pass.
  *
  * Note: bloom uniform is set as appSettings.bloom * 2.5 in QML
  */
@@ -33,26 +43,26 @@ vec4 getBloomSourceSample(sampler2D tex, vec2 coords, vec2 resolution) {
     vec2 texelSize = 1.0 / resolution;
     vec4 bloom = vec4(0.0);
     float totalWeight = 0.0;
-    
+
     // 13-tap blur pattern to approximate FastBlur radius 32
     // Using larger offsets with gaussian-like weights
     const float offsets[5] = float[5](0.0, 4.0, 8.0, 12.0, 16.0);
     const float weights[5] = float[5](0.20, 0.18, 0.14, 0.10, 0.06);
-    
+
     for (int i = 0; i < 5; i++) {
         float offset = offsets[i];
         float weight = weights[i];
-        
+
         // Sample in cross pattern
         vec2 offsetX = vec2(offset * texelSize.x, 0.0);
         vec2 offsetY = vec2(0.0, offset * texelSize.y);
-        
+
         // Clamp coordinates to prevent sampling outside bounds
         vec2 sampleCoordsPX = clamp(coords + offsetX, 0.0, 1.0);
         vec2 sampleCoordsNX = clamp(coords - offsetX, 0.0, 1.0);
         vec2 sampleCoordsPY = clamp(coords + offsetY, 0.0, 1.0);
         vec2 sampleCoordsNY = clamp(coords - offsetY, 0.0, 1.0);
-        
+
         if (i == 0) {
             bloom += texture2D(tex, coords) * weight;
             totalWeight += weight;
@@ -64,56 +74,53 @@ vec4 getBloomSourceSample(sampler2D tex, vec2 coords, vec2 resolution) {
             totalWeight += weight * 4.0;
         }
     }
-    
+
     if (totalWeight > 0.0) {
         bloom /= totalWeight;
     }
-    
+
     // Return with alpha = 1.0 (in QML the bloomSource has alpha from the original)
     return vec4(bloom.rgb, 1.0);
 }
 
 /**
- * Apply bloom effect to the final color
- * Matches QML exactly:
- *   vec4 bloomFullColor = texture2D(bloomSource, txt_coords);
- *   vec3 bloomColor = bloomFullColor.rgb;
- *   float bloomAlpha = bloomFullColor.a;
- *   bloomColor = convertWithChroma(bloomColor);
- *   finalColor += clamp(bloomColor * bloom * bloomAlpha, 0.0, 0.5);
+ * Apply bloom effect to the final color (RAW, no chroma conversion)
+ * Matches original QML static shader exactly:
+ *   vec3 bloomOnScreen = bloomColor * isScreen;
+ *   finalColor += clamp(bloomOnScreen * bloom * bloomAlpha, 0.0, 0.5);
+ *   float bloomScale = 1.0 + max(bloom, 0.0);
+ *   finalColor /= bloomScale;
  *
- * @param baseColor - The base terminal color
+ * The bloom is added as raw color. The bloomScale division normalizes
+ * the color range to fit in the render target. The dynamic pass will
+ * multiply by bloomScale to restore the full range before chroma conversion.
+ *
+ * @param baseColor - The base terminal color (raw, no chroma applied)
  * @param tex - Source texture for bloom sampling
  * @param coords - Texture coordinates (already curved via txt_coords)
  * @param resolution - Screen resolution
  * @param bloom - Bloom intensity (already multiplied by 2.5 in uniform)
- * @param fontColor - Font color for chroma conversion
- * @param chromaColor - Chroma color mixing amount
- * @return Color with bloom applied
+ * @return Color with bloom applied and divided by bloomScale
  */
-vec3 applyBloom(vec3 baseColor, sampler2D tex, vec2 coords, vec2 resolution, float bloom, vec3 fontColor, float chromaColor) {
+vec3 applyBloom(vec3 baseColor, sampler2D tex, vec2 coords, vec2 resolution, float bloom) {
     if (bloom <= 0.0) {
         return baseColor;
     }
-    
+
     // Get blurred color (simulating bloomSource)
     vec4 bloomFullColor = getBloomSourceSample(tex, coords, resolution);
     vec3 bloomColor = bloomFullColor.rgb;
     float bloomAlpha = bloomFullColor.a;
-    
-    // Apply convertWithChroma to bloom color
-    float grey = dot(bloomColor, vec3(0.21, 0.72, 0.04));
-    vec3 convertedBloom;
-    if (chromaColor > 0.0) {
-        convertedBloom = fontColor * mix(vec3(grey), bloomColor, chromaColor);
-    } else {
-        convertedBloom = fontColor * grey;
-    }
-    
-    // Add bloom contribution with clamping (exactly as QML)
-    vec3 bloomContribution = clamp(convertedBloom * bloom * bloomAlpha, 0.0, 0.5);
-    
-    return baseColor + bloomContribution;
+
+    // Add raw bloom contribution with clamping (exactly as QML static shader)
+    vec3 bloomContribution = clamp(bloomColor * bloom * bloomAlpha, 0.0, 0.5);
+    vec3 result = baseColor + bloomContribution;
+
+    // Normalize by bloomScale to fit in render target range
+    float bloomScale = 1.0 + max(bloom, 0.0);
+    result /= bloomScale;
+
+    return result;
 }
 `;
 

@@ -26,6 +26,7 @@ import { TerminalFrame } from "./TerminalFrame";
 import { TerminalText } from "./TerminalText";
 import { XTermConnector } from "./XTermConnector";
 import { type CRTTerminalSettings, DEFAULT_SETTINGS } from "./types";
+import { type Color, hexToColor, mixColors } from "./utils";
 
 export class CRTTerminal {
 	private container: HTMLElement;
@@ -87,24 +88,64 @@ export class CRTTerminal {
 	}
 
 	/**
+	 * Compute derived fontColor and backgroundColor from raw colors,
+	 * saturationColor, and contrast — matching QML ApplicationSettings.qml:
+	 *
+	 *   saturatedColor = mix(_fontColor, #FFFFFF, saturationColor * 0.5)
+	 *   fontColor = mix(_backgroundColor, saturatedColor, 0.7 + contrast * 0.3)
+	 *   backgroundColor = mix(saturatedColor, _backgroundColor, 0.7 + contrast * 0.3)
+	 */
+	private computeDerivedColors(): { fontColor: Color; backgroundColor: Color } {
+		const rawFont = hexToColor(this.settings.fontColor);
+		const rawBg = hexToColor(this.settings.backgroundColor);
+		const white: Color = { r: 1, g: 1, b: 1, a: 1 };
+
+		// saturatedColor = mix(_fontColor, white, saturationColor * 0.5)
+		// QML mix(c1, c2, alpha) = c1*(1-alpha) + c2*alpha
+		// Our mixColors(c1, c2, alpha) = c1*alpha + c2*(1-alpha)
+		// So QML mix(rawFont, white, sat*0.5) = mixColors(white, rawFont, sat*0.5)
+		const satAmount = this.settings.saturationColor * 0.5;
+		const saturatedColor: Color = {
+			r: rawFont.r * (1 - satAmount) + white.r * satAmount,
+			g: rawFont.g * (1 - satAmount) + white.g * satAmount,
+			b: rawFont.b * (1 - satAmount) + white.b * satAmount,
+			a: 1,
+		};
+
+		const mixFactor = 0.7 + this.settings.contrast * 0.3;
+
+		// fontColor = QML mix(_backgroundColor, saturatedColor, mixFactor)
+		//           = _backgroundColor * (1 - mixFactor) + saturatedColor * mixFactor
+		const derivedFont: Color = {
+			r: rawBg.r * (1 - mixFactor) + saturatedColor.r * mixFactor,
+			g: rawBg.g * (1 - mixFactor) + saturatedColor.g * mixFactor,
+			b: rawBg.b * (1 - mixFactor) + saturatedColor.b * mixFactor,
+			a: 1,
+		};
+
+		// backgroundColor = QML mix(saturatedColor, _backgroundColor, mixFactor)
+		//                  = saturatedColor * (1 - mixFactor) + _backgroundColor * mixFactor
+		const derivedBg: Color = {
+			r: saturatedColor.r * (1 - mixFactor) + rawBg.r * mixFactor,
+			g: saturatedColor.g * (1 - mixFactor) + rawBg.g * mixFactor,
+			b: saturatedColor.b * (1 - mixFactor) + rawBg.b * mixFactor,
+			a: 1,
+		};
+
+		return { fontColor: derivedFont, backgroundColor: derivedBg };
+	}
+
+	/**
 	 * Apply the current settings to the terminal renderer
 	 *
-	 * Note: fontColor and backgroundColor are only applied when explicitly
-	 * set by the user (not matching defaults). This preserves TerminalText's
-	 * internally calculated "mixed" background color based on contrast settings,
-	 * which creates the authentic CRT look with subtle color tinting.
+	 * Colors are derived from fontColor, backgroundColor, saturationColor,
+	 * and contrast — matching QML ApplicationSettings.qml exactly.
 	 */
 	private applySettings(): void {
 		const s = this.settings;
 
-		// Only apply font/background colors if explicitly changed from defaults
-		// This preserves TerminalText's internal mixed color calculation
-		if (s.fontColor !== DEFAULT_SETTINGS.fontColor) {
-			this.terminalText.setFontColor(s.fontColor);
-		}
-		if (s.backgroundColor !== DEFAULT_SETTINGS.backgroundColor) {
-			this.terminalText.setBackgroundColor(s.backgroundColor);
-		}
+		// Compute derived colors from raw colors + saturation + contrast
+		this.applyDerivedColors();
 
 		this.terminalText.setScreenCurvature(s.screenCurvature);
 		this.terminalText.setRgbShift(s.rgbShift);
@@ -122,6 +163,32 @@ export class CRTTerminal {
 		this.terminalText.setRasterizationIntensity(s.rasterizationIntensity);
 
 		this.terminalFrame.setScreenCurvature(s.screenCurvature);
+	}
+
+	/**
+	 * Recompute and apply derived font/background colors to the renderer.
+	 * Called whenever fontColor, backgroundColor, saturationColor, or contrast change.
+	 */
+	private applyDerivedColors(): void {
+		const { fontColor, backgroundColor } = this.computeDerivedColors();
+
+		const fontHex = `#${Math.round(fontColor.r * 255)
+			.toString(16)
+			.padStart(2, "0")}${Math.round(fontColor.g * 255)
+			.toString(16)
+			.padStart(2, "0")}${Math.round(fontColor.b * 255)
+			.toString(16)
+			.padStart(2, "0")}`;
+		const bgHex = `#${Math.round(backgroundColor.r * 255)
+			.toString(16)
+			.padStart(2, "0")}${Math.round(backgroundColor.g * 255)
+			.toString(16)
+			.padStart(2, "0")}${Math.round(backgroundColor.b * 255)
+			.toString(16)
+			.padStart(2, "0")}`;
+
+		this.terminalText.setFontColor(fontHex);
+		this.terminalText.setBackgroundColor(bgHex);
 	}
 
 	/**

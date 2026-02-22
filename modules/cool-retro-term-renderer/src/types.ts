@@ -49,6 +49,24 @@ export interface CRTTerminalSettings {
 	chromaColor?: number;
 
 	/**
+	 * Saturation color amount (0 = pure font color, 1 = font color mixed 50% toward white)
+	 * Controls how much the font color is desaturated/whitened.
+	 * This affects both the derived fontColor and backgroundColor sent to the shader.
+	 * Matches QML ApplicationSettings.qml saturatedColor computation.
+	 * (default: 0)
+	 */
+	saturationColor?: number;
+
+	/**
+	 * Contrast level (0-1) controlling the mixing between font and background colors.
+	 * Higher contrast means fontColor stays closer to the saturated font color
+	 * and backgroundColor stays closer to pure black.
+	 * Matches QML ApplicationSettings.qml contrast property.
+	 * (default: 0.85)
+	 */
+	contrast?: number;
+
+	/**
 	 * Flickering intensity, 0-1 (default: 0.1)
 	 */
 	flickering?: number;
@@ -103,6 +121,8 @@ export const DEFAULT_SETTINGS: Required<
 	brightness: 0.5,
 	ambientLight: 0.2,
 	chromaColor: 0,
+	saturationColor: 0,
+	contrast: 0.85,
 	flickering: 0.1,
 	horizontalSync: 0.08,
 	jitter: 0.1997,

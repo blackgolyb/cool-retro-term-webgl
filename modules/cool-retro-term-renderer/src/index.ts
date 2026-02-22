@@ -34,6 +34,7 @@
 
 export { CRTTerminal } from "./CRTTerminal";
 export { TerminalText } from "./TerminalText";
+export type { TerminalCell } from "./TerminalText";
 export { TerminalFrame } from "./TerminalFrame";
 export { XTermConnector } from "./XTermConnector";
 export type { CRTTerminalSettings } from "./types";

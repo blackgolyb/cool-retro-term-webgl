@@ -4,27 +4,35 @@
  * This implements the basic text rendering from cool-retro-term
  * similar to how QMLTermWidget renders text.
  *
- * Two-Pass Rendering Architecture (matching QML):
- * ================================================
- * Pass 1 (Static): Renders to staticRenderTarget (frameBuffer equivalent)
- *   - Screen curvature
+ * Two-Pass Rendering Architecture (matching QML ShaderTerminal.qml):
+ * ===================================================================
+ * Pass 1 (Static - terminal_static.frag equivalent):
+ *   Renders to staticRenderTarget (frameBuffer equivalent)
+ *   - Screen curvature distortion
  *   - Terminal text sampling
  *   - RGB shift (chromatic aberration)
- *   - Chroma color conversion
- *   - Bloom
+ *   - Bloom (raw, no chroma conversion) + bloomScale normalization
  *   - Brightness
+ *   NOTE: No chroma conversion here — output is raw color, normalized by
+ *   bloomScale to fit in [0,1] render target range.
  *
- * Pass 2 (Dynamic): Reads from staticRenderTarget, renders to screen
+ * Pass 2 (Dynamic - terminal_dynamic.frag equivalent):
+ *   Reads from staticRenderTarget, renders to screen
  *   - Horizontal sync distortion
  *   - Jitter
+ *   - bloomScale restoration (multiply to undo static pass division)
  *   - Burn-in (samples from staticRenderTarget, not flickered output)
- *   - Static noise
- *   - Glowing line
+ *   - Static noise + glowing line (added as raw intensity)
  *   - Rasterization
+ *   - Chroma color conversion (convertWithChroma — maps through fontColor/backgroundColor)
  *   - Flickering (applied ONLY at the end)
  *   - Ambient light
  *
- * This separation ensures flickering doesn't affect the burn-in source,
+ * This matches the original QML architecture where chroma conversion happens
+ * in the dynamic pass AFTER all effects are composited, ensuring noise,
+ * burn-in, and rasterization all go through the same color mapping.
+ *
+ * This separation also ensures flickering doesn't affect the burn-in source,
  * preventing ghosting when text is static (matching QML behavior).
  */
 
@@ -32,7 +40,6 @@ import * as THREE from "three";
 import { TERMINUS_FONT_BASE64 } from "./assets/font";
 import { NOISE_TEXTURE_BASE64 } from "./assets/noise";
 import { bloomGLSL } from "./shaders/effects/bloom";
-import { brightnessGLSL } from "./shaders/effects/brightness";
 import { burnInAccumulationGLSL, burnInGLSL } from "./shaders/effects/burnIn";
 import { chromaColorGLSL } from "./shaders/effects/chromaColor";
 import { flickeringGLSL } from "./shaders/effects/flickering";
@@ -50,6 +57,32 @@ import {
 	mixColors,
 	projectPixelWithCurvature,
 } from "./utils";
+
+/**
+ * Represents a single terminal cell with character and color information.
+ * Colors are CSS color strings (e.g., "#ff0000", "rgb(255,0,0)").
+ * null means "use default" (foreground = white, background = transparent/default).
+ */
+export interface TerminalCell {
+	/** The character to display (empty string for blank cells) */
+	char: string;
+	/** Foreground (text) color as CSS string, or null for default */
+	fg: string | null;
+	/** Background color as CSS string, or null for default */
+	bg: string | null;
+	/** Whether the cell has bold attribute */
+	bold?: boolean;
+	/** Whether the cell has dim attribute */
+	dim?: boolean;
+	/** Whether the cell has italic attribute */
+	italic?: boolean;
+	/** Whether the cell has underline attribute */
+	underline?: boolean;
+	/** Whether the cell has inverse (reverse video) attribute */
+	inverse?: boolean;
+	/** Whether the cell has strikethrough attribute */
+	strikethrough?: boolean;
+}
 
 /**
  * Font configuration based on Fonts.qml TERMINUS_SCALED settings
@@ -133,6 +166,7 @@ export class TerminalText {
 
 	// Terminal state
 	private text = "";
+	private cells: TerminalCell[][] = [];
 	private fontColor: Color;
 	private backgroundColor: Color;
 
@@ -271,21 +305,6 @@ export class TerminalText {
 		this.staticMaterial = new THREE.ShaderMaterial({
 			uniforms: {
 				textTexture: { value: this.texture },
-				fontColor: {
-					value: new THREE.Vector3(
-						this.fontColor.r,
-						this.fontColor.g,
-						this.fontColor.b,
-					),
-				},
-				backgroundColor: {
-					value: new THREE.Vector3(
-						this.backgroundColor.r,
-						this.backgroundColor.g,
-						this.backgroundColor.b,
-					),
-				},
-				chromaColor: { value: 0.0 },
 				screenCurvature: { value: 0.3 },
 				rgbShift: { value: 0.0 },
 				bloom: { value: 0.5538 * 2.5 },
@@ -369,6 +388,7 @@ export class TerminalText {
 					),
 				},
 				chromaColor: { value: 0.0 },
+				bloom: { value: 0.5538 * 2.5 },
 				screenCurvature: { value: 0.3 },
 				ambientLight: { value: 0.2 },
 				resolution: {
@@ -461,10 +481,27 @@ export class TerminalText {
 	}
 
 	/**
-	 * Set the terminal text content
+	 * Set the terminal text content (plain text, no color info)
 	 */
 	setText(text: string): void {
 		this.text = text;
+		this.cells = [];
+		this.render();
+	}
+
+	/**
+	 * Set the terminal cell data with per-cell color information.
+	 * Each row is an array of TerminalCell objects.
+	 * This replaces the plain text content with colored cell data.
+	 *
+	 * @param cells - 2D array of terminal cells [row][col]
+	 */
+	setCells(cells: TerminalCell[][]): void {
+		this.cells = cells;
+		// Also update the plain text for compatibility
+		this.text = cells
+			.map((row) => row.map((c) => c.char || " ").join(""))
+			.join("\n");
 		this.render();
 	}
 
@@ -644,81 +681,172 @@ export class TerminalText {
 			? `"${FONT_CONFIG.family}", ${FONT_CONFIG.fallback}`
 			: FONT_CONFIG.fallback;
 
-		ctx.fillStyle = `rgb(${Math.floor(this.backgroundColor.r * 255)}, ${Math.floor(this.backgroundColor.g * 255)}, ${Math.floor(this.backgroundColor.b * 255)})`;
+		// Default background color for empty canvas
+		const defaultBg = `rgb(${Math.floor(this.backgroundColor.r * 255)}, ${Math.floor(this.backgroundColor.g * 255)}, ${Math.floor(this.backgroundColor.b * 255)})`;
+
+		ctx.fillStyle = defaultBg;
 		ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-		ctx.font = `${fontSize}px ${fontFamily}`;
 		ctx.textBaseline = "top";
 		ctx.imageSmoothingEnabled = false;
 
+		const hasCells = this.cells.length > 0;
 		const lines = this.text.split("\n");
 		const marginPixels = this.totalMargin;
+		const cellWidth = this.charWidth * this.screenScaling;
+		const cellHeight = this.charHeight * this.screenScaling;
+
+		// Default foreground is white (shader will remap via convertWithChroma)
+		const defaultFg = "#ffffff";
 
 		for (let row = 0; row < this.rows; row++) {
+			const cellRow =
+				hasCells && row < this.cells.length ? this.cells[row] : null;
 			const line = row < lines.length ? lines[row] : "";
-			const y = marginPixels + row * this.charHeight * this.screenScaling;
+			const y = marginPixels + row * cellHeight;
 
 			for (let col = 0; col < this.cols; col++) {
-				const x = marginPixels + col * this.charWidth * this.screenScaling;
-				const char = col < line.length ? line[col] : "";
+				const x = marginPixels + col * cellWidth;
+				const cell = cellRow && col < cellRow.length ? cellRow[col] : null;
+				const char = cell ? cell.char : col < line.length ? line[col] : "";
 				const isSelected = this.isCellSelected(col, row);
 
+				// Determine foreground and background colors for this cell
+				let fgColor: string;
+				let bgColor: string | null;
+
+				if (cell) {
+					fgColor = cell.fg || defaultFg;
+					bgColor = cell.bg || null;
+
+					// Handle inverse (reverse video)
+					if (cell.inverse) {
+						const tmp = fgColor;
+						fgColor = bgColor || defaultBg;
+						bgColor = tmp;
+					}
+				} else {
+					fgColor = defaultFg;
+					bgColor = null;
+				}
+
 				if (isSelected) {
-					const cellWidth = this.charWidth * this.screenScaling;
-					const cellHeight = this.charHeight * this.screenScaling;
+					// Selection: white background, inverted text
 					ctx.fillStyle = "#ffffff";
 					ctx.fillRect(x, y, cellWidth, cellHeight);
 
-					if (char) {
-						ctx.fillStyle = `rgb(${Math.floor(this.backgroundColor.r * 255)}, ${Math.floor(this.backgroundColor.g * 255)}, ${Math.floor(this.backgroundColor.b * 255)})`;
+					if (char && char !== " ") {
+						ctx.fillStyle = bgColor || defaultBg;
+						const fontStyle = this.buildFontStyle(cell, fontSize, fontFamily);
+						ctx.font = fontStyle;
 						ctx.save();
 						ctx.translate(x, y);
 						ctx.scale(this.screenScaling, this.screenScaling);
 						ctx.fillText(char, 0, 0);
 						ctx.restore();
 					}
-				} else if (char) {
-					ctx.fillStyle = "#ffffff";
-					ctx.save();
-					ctx.translate(x, y);
-					ctx.scale(this.screenScaling, this.screenScaling);
-					ctx.fillText(char, 0, 0);
-					ctx.restore();
+				} else {
+					// Draw cell background if non-default
+					if (bgColor) {
+						ctx.fillStyle = bgColor;
+						ctx.fillRect(x, y, cellWidth, cellHeight);
+					}
+
+					// Draw character
+					if (char && char !== " ") {
+						// Apply dim attribute (reduce brightness)
+						if (cell?.dim) {
+							ctx.globalAlpha = 0.5;
+						}
+
+						ctx.fillStyle = fgColor;
+						const fontStyle = this.buildFontStyle(cell, fontSize, fontFamily);
+						ctx.font = fontStyle;
+						ctx.save();
+						ctx.translate(x, y);
+						ctx.scale(this.screenScaling, this.screenScaling);
+						ctx.fillText(char, 0, 0);
+						ctx.restore();
+
+						// Draw underline
+						if (cell?.underline) {
+							ctx.fillStyle = fgColor;
+							const underlineY = y + cellHeight - 1 * this.screenScaling;
+							ctx.fillRect(x, underlineY, cellWidth, 1 * this.screenScaling);
+						}
+
+						// Draw strikethrough
+						if (cell?.strikethrough) {
+							ctx.fillStyle = fgColor;
+							const strikeY = y + cellHeight * 0.5;
+							ctx.fillRect(x, strikeY, cellWidth, 1 * this.screenScaling);
+						}
+
+						if (cell?.dim) {
+							ctx.globalAlpha = 1.0;
+						}
+					}
 				}
 			}
 		}
 
+		// Draw cursor
 		if (
 			this.cursorVisible &&
 			this.cursorBlinkState &&
 			this.cursorRow < this.rows
 		) {
-			const cursorX =
-				marginPixels + this.cursorCol * this.charWidth * this.screenScaling;
-			const cursorY =
-				marginPixels + this.cursorRow * this.charHeight * this.screenScaling;
-
-			const cursorWidth = this.charWidth * this.screenScaling;
-			const cursorHeight = this.charHeight * this.screenScaling;
+			const cursorX = marginPixels + this.cursorCol * cellWidth;
+			const cursorY = marginPixels + this.cursorRow * cellHeight;
 
 			ctx.fillStyle = "#ffffff";
-			ctx.fillRect(cursorX, cursorY, cursorWidth, cursorHeight);
+			ctx.fillRect(cursorX, cursorY, cellWidth, cellHeight);
 
-			if (this.cursorRow < lines.length) {
-				const line = lines[this.cursorRow];
-				if (this.cursorCol < line.length) {
-					const charUnderCursor = line[this.cursorCol];
-					ctx.fillStyle = `rgb(${Math.floor(this.backgroundColor.r * 255)}, ${Math.floor(this.backgroundColor.g * 255)}, ${Math.floor(this.backgroundColor.b * 255)})`;
-					ctx.save();
-					ctx.translate(cursorX, cursorY);
-					ctx.scale(this.screenScaling, this.screenScaling);
-					ctx.fillText(charUnderCursor, 0, 0);
-					ctx.restore();
-				}
+			// Draw character under cursor with inverted colors
+			const cursorCellRow =
+				hasCells && this.cursorRow < this.cells.length
+					? this.cells[this.cursorRow]
+					: null;
+			const cursorCell =
+				cursorCellRow && this.cursorCol < cursorCellRow.length
+					? cursorCellRow[this.cursorCol]
+					: null;
+			const charUnderCursor = cursorCell
+				? cursorCell.char
+				: this.cursorRow < lines.length &&
+						this.cursorCol < lines[this.cursorRow].length
+					? lines[this.cursorRow][this.cursorCol]
+					: "";
+
+			if (charUnderCursor && charUnderCursor !== " ") {
+				ctx.fillStyle = cursorCell?.bg || defaultBg;
+				const fontStyle = this.buildFontStyle(cursorCell, fontSize, fontFamily);
+				ctx.font = fontStyle;
+				ctx.save();
+				ctx.translate(cursorX, cursorY);
+				ctx.scale(this.screenScaling, this.screenScaling);
+				ctx.fillText(charUnderCursor, 0, 0);
+				ctx.restore();
 			}
 		}
 
 		this.texture.needsUpdate = true;
+	}
+
+	/**
+	 * Build a CSS font string with bold/italic attributes
+	 */
+	private buildFontStyle(
+		cell: TerminalCell | null | undefined,
+		fontSize: number,
+		fontFamily: string,
+	): string {
+		if (!cell) {
+			return `${fontSize}px ${fontFamily}`;
+		}
+		const bold = cell.bold ? "bold " : "";
+		const italic = cell.italic ? "italic " : "";
+		return `${italic}${bold}${fontSize}px ${fontFamily}`;
 	}
 
 	/**
@@ -772,7 +900,6 @@ export class TerminalText {
 			this.fontColor.g,
 			this.fontColor.b,
 		);
-		this.staticMaterial.uniforms.fontColor.value.copy(colorVec);
 		this.dynamicMaterial.uniforms.fontColor.value.copy(colorVec);
 	}
 
@@ -786,7 +913,6 @@ export class TerminalText {
 			this.backgroundColor.g,
 			this.backgroundColor.b,
 		);
-		this.staticMaterial.uniforms.backgroundColor.value.copy(colorVec);
 		this.dynamicMaterial.uniforms.backgroundColor.value.copy(colorVec);
 		this.render();
 	}
@@ -811,6 +937,7 @@ export class TerminalText {
 	 */
 	setBloom(intensity: number): void {
 		this.staticMaterial.uniforms.bloom.value = intensity * 2.5;
+		this.dynamicMaterial.uniforms.bloom.value = intensity * 2.5;
 	}
 
 	/**
@@ -831,7 +958,6 @@ export class TerminalText {
 	 * Set the chroma color amount
 	 */
 	setChromaColor(amount: number): void {
-		this.staticMaterial.uniforms.chromaColor.value = amount;
 		this.dynamicMaterial.uniforms.chromaColor.value = amount;
 	}
 
@@ -1109,9 +1235,6 @@ const staticPassFragmentShader = /* glsl */ `
 precision mediump float;
 
 uniform sampler2D textTexture;
-uniform vec3 fontColor;
-uniform vec3 backgroundColor;
-uniform float chromaColor;
 uniform float screenCurvature;
 uniform float rgbShift;
 uniform float bloom;
@@ -1121,15 +1244,12 @@ uniform vec2 resolution;
 varying vec2 vUv;
 
 ${screenCurvatureGLSL}
-${chromaColorGLSL}
 ${rgbShiftGLSL}
 ${bloomGLSL}
-${brightnessGLSL}
 
 void main() {
     vec2 cc = vec2(0.5) - vUv;
 
-    vec2 curvatureCoords = getRawCurvatureCoords(vUv, cc, screenCurvature);
     vec2 txt_coords = screenCurvature > 0.0 ? applyStaticCurvature(vUv, cc, screenCurvature) : vUv;
 
     vec3 txt_color = texture2D(textTexture, txt_coords).rgb;
@@ -1138,23 +1258,16 @@ void main() {
         txt_color = applyRgbShift(textTexture, txt_coords, rgbShift);
     }
 
-    txt_color += vec3(0.0001);
-    float greyscale_color = rgb2grey(txt_color);
+    vec3 finalColor = txt_color;
 
-    float reflectionMask = screenCurvature > 0.0 ? calculateReflectionMask(curvatureCoords) : 1.0;
-
-    vec3 finalColor;
-    if (chromaColor > 0.0) {
-        vec3 foregroundColor = mix(fontColor, txt_color * fontColor / greyscale_color, chromaColor);
-        finalColor = mix(backgroundColor, foregroundColor, greyscale_color * reflectionMask);
-    } else {
-        finalColor = mix(backgroundColor, fontColor, greyscale_color * reflectionMask);
-    }
-
+    // Apply bloom (adds raw bloom contribution and divides by bloomScale)
+    // Matching QML static shader: bloom is raw, no chroma conversion here.
+    // The dynamic pass will multiply by bloomScale to restore range before chroma.
     if (bloom > 0.0) {
-        finalColor = applyBloom(finalColor, textTexture, txt_coords, resolution, bloom, fontColor, chromaColor);
+        finalColor = applyBloom(finalColor, textTexture, txt_coords, resolution, bloom);
     }
 
+    // Apply brightness (matching QML: finalColor *= screen_brightness)
     float screen_brightness = mix(0.5, 1.5, brightness);
     finalColor *= screen_brightness;
 
@@ -1174,6 +1287,7 @@ uniform sampler2D textTexture;
 uniform vec3 fontColor;
 uniform vec3 backgroundColor;
 uniform float chromaColor;
+uniform float bloom;
 uniform float screenCurvature;
 uniform float ambientLight;
 uniform vec2 resolution;
@@ -1241,16 +1355,24 @@ void main() {
 
     vec3 txt_color = texture2D(frameBuffer, txt_coords).rgb;
 
+    // Restore bloom scale (matching QML: txt_color *= bloomScale in dynamic pass)
+    float bloomScale = 1.0 + max(bloom, 0.0);
+    txt_color *= bloomScale;
+
     if (burnIn > 0.0) {
         vec3 burnInColor = texture2D(burnInSource, txt_coords).rgb;
+        // Burn-in source also needs bloomScale restoration
+        burnInColor *= bloomScale;
         txt_color = applyBurnIn(txt_color, burnInColor, burnIn);
     }
 
-    txt_color += fontColor * colorAccum;
+    // Add noise/glow as raw intensity (goes through chroma conversion below)
+    txt_color += vec3(colorAccum);
 
     txt_color = applyRasterization(staticCoords, txt_color, virtualResolution, rasterizationIntensity, rasterizationMode);
 
-    vec3 finalColor = txt_color;
+    // Apply chroma color conversion (matching QML: convertWithChroma in dynamic pass)
+    vec3 finalColor = convertWithChroma(txt_color, fontColor, backgroundColor, chromaColor);
 
     if (flickering > 0.0) {
         finalColor *= flickeringBrightness;
