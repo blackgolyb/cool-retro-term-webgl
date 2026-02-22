@@ -105,6 +105,34 @@ export interface CRTTerminalSettings {
 	 * Rasterization intensity, 0-1 (default: 0.5)
 	 */
 	rasterizationIntensity?: number;
+
+	/**
+	 * Frame (bezel) size around the screen, 0-1 (default: 0.2).
+	 * This is the raw _frameSize value from QML; the shader receives
+	 * _frameSize * 0.05 * normalizedWindowScale.
+	 */
+	frameSize?: number;
+
+	/**
+	 * Screen corner radius, 0-1 (default: 0.2).
+	 * This is the raw _screenRadius value from QML; the shader receives
+	 * lint(4.0, 120.0, _screenRadius) in pixel units.
+	 */
+	screenRadius?: number;
+
+	/**
+	 * Frame shininess / reflectivity, 0-1 (default: 0.2).
+	 * This is the raw _frameShininess value from QML; the shader receives
+	 * _frameShininess * 0.5.
+	 */
+	frameShininess?: number;
+
+	/**
+	 * Frame color in hex format (default: "#ffffff").
+	 * Combined with font/background colors and ambient light to produce
+	 * the final bezel tint (matching QML TerminalFrame.qml).
+	 */
+	frameColor?: string;
 }
 
 /**
@@ -131,4 +159,8 @@ export const DEFAULT_SETTINGS: Required<
 	burnIn: 0.2517,
 	rasterizationMode: 1,
 	rasterizationIntensity: 0.5,
+	frameSize: 0.2,
+	screenRadius: 0.2,
+	frameShininess: 0.2,
+	frameColor: "#ffffff",
 };

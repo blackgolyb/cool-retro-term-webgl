@@ -162,7 +162,13 @@ export class CRTTerminal {
 		this.terminalText.setRasterizationMode(s.rasterizationMode);
 		this.terminalText.setRasterizationIntensity(s.rasterizationIntensity);
 
+		// Frame settings (matching QML TerminalFrame.qml)
 		this.terminalFrame.setScreenCurvature(s.screenCurvature);
+		this.terminalFrame.setFrameSize(s.frameSize);
+		this.terminalFrame.setScreenRadius(s.screenRadius);
+		this.terminalFrame.setFrameShininess(s.frameShininess);
+		this.terminalFrame.setAmbientLight(s.ambientLight);
+		this.terminalFrame.setFrameColor(s.frameColor);
 	}
 
 	/**
@@ -189,6 +195,11 @@ export class CRTTerminal {
 
 		this.terminalText.setFontColor(fontHex);
 		this.terminalText.setBackgroundColor(bgHex);
+
+		// Pass derived colors to frame so it can compute its tint
+		// (QML TerminalFrame.qml uses _fontColor and _backgroundColor)
+		this.terminalFrame.setFontColor(fontHex);
+		this.terminalFrame.setBackgroundColor(bgHex);
 	}
 
 	/**
