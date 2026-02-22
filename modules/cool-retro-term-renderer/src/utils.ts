@@ -70,23 +70,27 @@ export function colorToVec4(color: Color): [number, number, number, number] {
 }
 
 /**
- * Inverse barrel distortion: given a pixel position on screen, compute
- * where that pixel would be on the undistorted (flat) terminal surface.
+ * Apply barrel distortion forward to map a screen pixel to the
+ * corresponding position on the flat (undistorted) terminal canvas.
  *
- * The barrel distortion in the shader is:
+ * This matches the QML correctDistortion() function and the shader's
+ * barrel() function, which both compute:
  *   cc = vec2(0.5) - uv
  *   ccCorrected = cc (with aspect ratio correction)
  *   dist = dot(ccCorrected, ccCorrected) * curvature
- *   distorted = uv - cc * (1 + dist) * dist
+ *   result = uv - cc * (1 + dist) * dist
  *
- * This function approximates the inverse using iterative refinement.
+ * The shader uses this to determine which texture coordinate to sample
+ * for each screen pixel. For mouse picking we need the same mapping:
+ * given where the user clicked on screen, find which canvas position
+ * (and therefore which grid cell) is displayed there.
  *
  * @param pixelX - X pixel coordinate on screen
  * @param pixelY - Y pixel coordinate on screen
  * @param width - Screen width in pixels
  * @param height - Screen height in pixels
  * @param curvature - Curvature amount (same value passed to shader)
- * @returns Corrected pixel coordinates on the flat terminal surface
+ * @returns Canvas-space pixel coordinates on the flat terminal surface
  */
 export function projectPixelWithCurvature(
 	pixelX: number,
@@ -100,55 +104,33 @@ export function projectPixelWithCurvature(
 	}
 
 	// Normalize to UV space [0, 1]
-	const targetU = pixelX / width;
-	const targetV = pixelY / height;
+	const u = pixelX / width;
+	const v = pixelY / height;
+
+	// cc = center offset (matching shader: vec2(0.5) - vUv)
+	const ccX = 0.5 - u;
+	const ccY = 0.5 - v;
 
 	// Aspect ratio correction (matching the shader)
 	const aspectRatio = width / height;
-
-	// Forward barrel distortion function
-	function barrelDistort(u: number, v: number): { u: number; v: number } {
-		const ccX = 0.5 - u;
-		const ccY = 0.5 - v;
-
-		let ccCorrX = ccX;
-		let ccCorrY = ccY;
-		if (aspectRatio > 1.0) {
-			ccCorrX /= aspectRatio;
-		} else {
-			ccCorrY *= aspectRatio;
-		}
-
-		const dist = (ccCorrX * ccCorrX + ccCorrY * ccCorrY) * curvature;
-		const factor = (1.0 + dist) * dist;
-
-		return {
-			u: u - ccX * factor,
-			v: v - ccY * factor,
-		};
+	let ccCorrX = ccX;
+	let ccCorrY = ccY;
+	if (aspectRatio > 1.0) {
+		ccCorrX /= aspectRatio;
+	} else {
+		ccCorrY *= aspectRatio;
 	}
 
-	// Iterative inverse: start with target and refine
-	let guessU = targetU;
-	let guessV = targetV;
+	// Forward barrel distortion (same formula as shader barrel())
+	const dist = (ccCorrX * ccCorrX + ccCorrY * ccCorrY) * curvature;
+	const factor = (1.0 + dist) * dist;
 
-	for (let i = 0; i < 10; i++) {
-		const distorted = barrelDistort(guessU, guessV);
-		const errorU = distorted.u - targetU;
-		const errorV = distorted.v - targetV;
-
-		guessU -= errorU;
-		guessV -= errorV;
-
-		// Early exit if converged
-		if (Math.abs(errorU) < 1e-6 && Math.abs(errorV) < 1e-6) {
-			break;
-		}
-	}
+	const textureU = u - ccX * factor;
+	const textureV = v - ccY * factor;
 
 	// Convert back to pixel space
 	return {
-		x: guessU * width,
-		y: guessV * height,
+		x: textureU * width,
+		y: textureV * height,
 	};
 }
