@@ -44,7 +44,12 @@ import { rasterizationGLSL } from "./shaders/effects/rasterization";
 import { rgbShiftGLSL } from "./shaders/effects/rgbShift";
 import { screenCurvatureGLSL } from "./shaders/effects/screenCurvature";
 import { staticNoiseGLSL } from "./shaders/effects/staticNoise";
-import { type Color, hexToColor, mixColors } from "./utils";
+import {
+	type Color,
+	hexToColor,
+	mixColors,
+	projectPixelWithCurvature,
+} from "./utils";
 
 /**
  * Font configuration based on Fonts.qml TERMINUS_SCALED settings
@@ -130,6 +135,7 @@ export class TerminalText {
 	private text = "";
 	private fontColor: Color;
 	private backgroundColor: Color;
+
 	private charWidth = 0;
 	private charHeight = 0;
 	private cols = 80;
@@ -182,7 +188,7 @@ export class TerminalText {
 		this.logicalHeight = height;
 
 		this.fontColor = hexToColor(TERMINAL_SETTINGS.fontColor);
-		const baseBackground = hexToColor(TERMINAL_SETTINGS.backgroundColor);
+		this.backgroundColor = hexToColor(TERMINAL_SETTINGS.backgroundColor);
 
 		// Calculate scaling values (matching QML)
 		this.totalFontScaling =
@@ -200,13 +206,7 @@ export class TerminalText {
 		const frameMargin = lint(1.0, 50.0, TERMINAL_SETTINGS._frameMargin);
 		this.totalMargin = frameMargin + margin;
 
-		// Calculate mixed background color
-		this.backgroundColor = calculateMixedBackgroundColor(
-			baseBackground,
-			this.fontColor,
-			TERMINAL_SETTINGS.contrast,
-			TERMINAL_SETTINGS.saturationColor,
-		);
+		// Use pure background color without mixing
 
 		// Create canvas for text rendering at full device pixel resolution
 		this.canvas = document.createElement("canvas");
@@ -572,14 +572,28 @@ export class TerminalText {
 
 	/**
 	 * Convert pixel coordinates to grid position
+	 * Takes into account screen curvature by applying inverse barrel distortion
 	 */
 	pixelToGrid(pixelX: number, pixelY: number): { col: number; row: number } {
+		// Get current curvature value
+		const curvature = this.staticMaterial.uniforms.screenCurvature.value;
+
+		// Apply inverse barrel distortion to get corrected pixel coordinates
+		const corrected = projectPixelWithCurvature(
+			pixelX,
+			pixelY,
+			this.logicalWidth,
+			this.logicalHeight,
+			curvature,
+		);
+
+		// Calculate grid position using adjusted coordinates
 		const marginPixels = this.totalMargin;
 		const cellWidth = this.charWidth * this.screenScaling;
 		const cellHeight = this.charHeight * this.screenScaling;
 
-		const col = Math.floor((pixelX - marginPixels) / cellWidth);
-		const row = Math.floor((pixelY - marginPixels) / cellHeight);
+		const col = Math.floor((corrected.x - marginPixels) / cellWidth);
+		const row = Math.floor((corrected.y - marginPixels) / cellHeight);
 
 		return {
 			col: Math.max(0, Math.min(col, this.cols - 1)),
@@ -1114,21 +1128,21 @@ ${brightnessGLSL}
 
 void main() {
     vec2 cc = vec2(0.5) - vUv;
-    
+
     vec2 curvatureCoords = getRawCurvatureCoords(vUv, cc, screenCurvature);
     vec2 txt_coords = screenCurvature > 0.0 ? applyStaticCurvature(vUv, cc, screenCurvature) : vUv;
-    
+
     vec3 txt_color = texture2D(textTexture, txt_coords).rgb;
-    
+
     if (rgbShift > 0.0) {
         txt_color = applyRgbShift(textTexture, txt_coords, rgbShift);
     }
-    
+
     txt_color += vec3(0.0001);
     float greyscale_color = rgb2grey(txt_color);
-    
+
     float reflectionMask = screenCurvature > 0.0 ? calculateReflectionMask(curvatureCoords) : 1.0;
-    
+
     vec3 finalColor;
     if (chromaColor > 0.0) {
         vec3 foregroundColor = mix(fontColor, txt_color * fontColor / greyscale_color, chromaColor);
@@ -1136,14 +1150,14 @@ void main() {
     } else {
         finalColor = mix(backgroundColor, fontColor, greyscale_color * reflectionMask);
     }
-    
+
     if (bloom > 0.0) {
         finalColor = applyBloom(finalColor, textTexture, txt_coords, resolution, bloom, fontColor, chromaColor);
     }
-    
+
     float screen_brightness = mix(0.5, 1.5, brightness);
     finalColor *= screen_brightness;
-    
+
     gl_FragColor = vec4(finalColor, 1.0);
 }
 `;
@@ -1192,60 +1206,60 @@ ${rasterizationGLSL}
 void main() {
     vec2 cc = vec2(0.5) - vUv;
     float distance = length(cc);
-    
+
     vec2 staticCoords = screenCurvature > 0.0 ? barrel(vUv, cc, screenCurvature) : vUv;
-    
+
     vec4 initialNoiseTexel = sampleInitialNoise(time);
-    
+
     float flickeringBrightness = calculateFlickeringBrightness(initialNoiseTexel, flickering);
-    
+
     float distortionScale = getHorizontalSyncDistortionScale(initialNoiseTexel, horizontalSync);
-    
+
     float noise = staticNoise;
-    
+
     vec2 coords = vUv;
-    
+
     coords = applyHorizontalSync(coords, time, initialNoiseTexel, horizontalSync);
     if (horizontalSync > 0.0) {
         noise += distortionScale * 7.0;
     }
-    
+
     vec4 screenNoiseTexel = sampleScreenNoise(coords, time);
-    
+
     vec2 txt_coords = applyJitter(coords, screenNoiseTexel, jitter);
-    
+
     float colorAccum = 0.0001;
-    
+
     if (staticNoise > 0.0 || distortionScale > 0.0) {
         float noiseVal = screenNoiseTexel.a;
         colorAccum += noiseVal * noise * (1.0 - distance * 1.3);
     }
-    
+
     if (glowingLine > 0.0) {
         colorAccum += calculateGlowingLineContribution(coords, virtualResolution, time, glowingLine);
     }
-    
+
     vec3 txt_color = texture2D(frameBuffer, txt_coords).rgb;
-    
+
     if (burnIn > 0.0) {
         vec3 burnInColor = texture2D(burnInSource, txt_coords).rgb;
         txt_color = applyBurnIn(txt_color, burnInColor, burnIn);
     }
-    
+
     txt_color += fontColor * colorAccum;
-    
+
     txt_color = applyRasterization(staticCoords, txt_color, virtualResolution, rasterizationIntensity, rasterizationMode);
-    
+
     vec3 finalColor = txt_color;
-    
+
     if (flickering > 0.0) {
         finalColor *= flickeringBrightness;
     }
-    
+
     if (ambientLight > 0.0) {
         finalColor += vec3(ambientLight * 0.2) * (1.0 - distance) * (1.0 - distance);
     }
-    
+
     gl_FragColor = vec4(finalColor, 1.0);
 }
 `;
